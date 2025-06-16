@@ -26,8 +26,7 @@ YOLOP_NAMES = [
 ]
 
 # -------------------------------------------------------------------------
-# Inference resolution – divisible by 32 for both nets
-# You may reduce these if too slow (e.g., 512x288 or 320x192).
+# Inference resolution – divisible by 32 for both nets (Do not change)
 PROC_W, PROC_H = 640, 384
 SEG_W, SEG_H = (math.ceil(v/32)*32 for v in (PROC_W, PROC_H))
 
