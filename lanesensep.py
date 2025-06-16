@@ -66,7 +66,7 @@ from lib.core.general import non_max_suppression as yolop_nms
 
 # -----------------------------------------------------------------------------
 # Video I/O
-VIDEO_IN  = r"C:\\Users\\jiami\\Videos\\2025-06-15_17-01-53-front.mp4"
+VIDEO_IN  = r"C:\Users\jiami\Videos\2025-06-15_17-06-56-front.mp4"
 VIDEO_OUT = "output_yolop_fix.avi"
 
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -163,7 +163,7 @@ def process_batch(frames, prev_t):
         _, _, _, _, seg = hn(seg_in)
         det_raw, _da, _ll = yolop(det_in)
         det_flat = flatten_yolop_outputs(det_raw)
-        dets = yolop_nms(det_flat, conf_thres=0.35, iou_thres=0.5)
+        dets = yolop_nms(det_flat, conf_thres=0.7, iou_thres=0.4)
 
     # Post‑process -------------------------------------------------------
     masks_small = seg.argmax(1).cpu().numpy()[:, :PROC_H, :PROC_W]
