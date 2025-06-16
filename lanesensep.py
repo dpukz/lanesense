@@ -57,7 +57,7 @@ from lib.core.general import non_max_suppression as yolop_nms
 
 # -------------------------------------------------------------------------
 # Video I/O
-VIDEO_IN  = r"C:\Users\jiami\Videos\2025-06-15_16-32-40-front.mp4"
+VIDEO_IN  = r"C:\Users\jiami\Downloads\yt1z.net - 3-Hour Drive on California Freeway Dash Cam Tours (360p).mp4"
 VIDEO_OUT = "output_yolop_fix.avi"
 
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -140,27 +140,19 @@ def process_batch(frames, prev_t):
             # BGR -> RGB:
             rgb_tensor = frame_tensor[:, [2,1,0], :, :]  # still 0..255
             # Resize to (PROC_H, PROC_W) using interpolate
-            small_rgb_tensor = F.interpolate(rgb_tensor.unsqueeze(0) if False else rgb_tensor,
-                                             size=(PROC_H, PROC_W),
-                                             mode='bilinear',
-                                             align_corners=False)
-            # Now small_rgb_tensor: shape (B,3,PROC_H,PROC_W)
+            small_rgb_tensor = F.interpolate(rgb_tensor, size=(PROC_H, PROC_W), mode='bilinear', align_corners=False)
             # Also get small_bgr for detection input
             small_bgr_tensor = small_rgb_tensor[:, [2,1,0], :, :]
             use_gpu_resize = True
-        except Exception as e:
-            # Fallback to CPU resizing if anything fails
+        except Exception:
             use_gpu_resize = False
 
     if use_gpu_resize:
         # Prepare HybridNets input on GPU
-        # Normalize small_rgb_tensor from [0,255] to [0,1], then standardize
         rgb_norm = small_rgb_tensor.div_(255.0)
-        # Apply mean/std: broadcast over batch and spatial dims
         mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1,3,1,1)
         std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(1,3,1,1)
         hn_in = (rgb_norm - mean) / std  # shape (B,3,PROC_H,PROC_W)
-        # Pad to SEG_H, SEG_W: create zeros and copy
         B = hn_in.shape[0]
         seg_canvas = torch.zeros((B, 3, SEG_H, SEG_W), device=device, dtype=hn_in.dtype)
         seg_canvas[:, :, :PROC_H, :PROC_W] = hn_in
@@ -172,14 +164,12 @@ def process_batch(frames, prev_t):
         # CPU fallback: use cv2.resize and hn_pre_cpu
         small_bgr = [cv2.resize(f, (PROC_W, PROC_H)) for f in frames]
         small_rgb = [cv2.cvtColor(s, cv2.COLOR_BGR2RGB) for s in small_bgr]
-        # HybridNets input CPU -> to device
         seg_list = []
         for rgb in small_rgb:
             canvas = np.zeros((SEG_H, SEG_W, 3), np.uint8)
             canvas[:PROC_H, :PROC_W] = rgb
             seg_list.append(hn_pre_cpu(canvas))
         seg_in = torch.stack(seg_list)
-        # YOLOP input
         det_in = torch.stack([
             torch.from_numpy(b.transpose(2, 0, 1)).float().div_(255.0)
             for b in small_bgr
@@ -212,18 +202,14 @@ def process_batch(frames, prev_t):
     scale_tensor = torch.tensor([sx, sy, sx, sy], device='cpu')
 
     for idx, det in enumerate(dets):
-        # For overlay, we need the original frame
         frame = frames[idx]
-        # Segmentation overlay via CPU numpy mask
         mk_s = masks_small[idx]
         mask = cv2.resize(mk_s.astype(np.uint8), (orig_W, orig_H), cv2.INTER_NEAREST)
         overlay = frame.copy()
         overlay[mask == 2] = (0, 255, 0)
         vis = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
 
-        # Detection boxes
         if det is not None and len(det):
-            # Move to CPU and clone to avoid in-place errors
             if det.device.type != 'cpu':
                 det = det.cpu()
             det = det.clone()
@@ -271,10 +257,21 @@ threading.Thread(target=reader, daemon=True).start()
 threading.Thread(target=worker, daemon=True).start()
 
 print("running – press q to quit")
+# -------------------------------------------------------------------------
+# Display loop with 30 FPS limiter
+last_disp = time.time()
+FRAME_INTERVAL = 1.0 / 30.0  # seconds per frame for 30 FPS
 while True:
     frame = result_q.get()
     if frame is _SENTINEL:
         break
+    # Limit to ~30 FPS
+    now = time.time()
+    elapsed = now - last_disp
+    if elapsed < FRAME_INTERVAL:
+        time.sleep(FRAME_INTERVAL - elapsed)
+    last_disp = time.time()
+
     writer.write(frame)
     cv2.imshow("Output", frame)
     if cv2.waitKey(1) & 0xFF == ord("q"):
