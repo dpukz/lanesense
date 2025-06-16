@@ -10,38 +10,27 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torchvision.ops as _ops
 import torchvision.transforms as transforms
 
 # -------------------------------------------------------------------------
-# Monkey-patch 1: timm.models.layers.activations.Swish
-# HybridNets expects: from timm.models.layers.activations import Swish
-import types
-import torch.nn as nn
-if "timm.models.layers.activations" not in sys.modules:
-    m = types.ModuleType("timm.models.layers.activations")
-    m.Swish = nn.SiLU
-    sys.modules["timm.models.layers.activations"] = m
+# Ensure timm==0.5.4 is installed in this environment:
+#   pip install timm==0.5.4
+# Then restart this script so timm 0.5.4 is loaded.
 
 # -------------------------------------------------------------------------
-# Monkey-patch 2: DefaultCfg __getitem__ for timm default_cfgs compatibility
-# HybridNets code may do default_cfgs[name]['mean'], but newer timm has DefaultCfg objects.
+# Stub out timm.models.beit.gen_relative_position_index so MiDaS hub code won't crash if it tries to import it.
 try:
-    import timm
-    # Access timm's default_cfgs registry
-    from timm.models.registry import default_cfgs
-    if default_cfgs:
-        # Pick any one DefaultCfg instance to get its class
-        example_cfg = next(iter(default_cfgs.values()))
-        cfg_cls = type(example_cfg)
-        if not hasattr(cfg_cls, "__getitem__"):
-            def _defaultcfg_getitem(self, key):
-                if hasattr(self, key):
-                    return getattr(self, key)
-                raise KeyError(f"DefaultCfg has no attribute '{key}'")
-            cfg_cls.__getitem__ = _defaultcfg_getitem
-except Exception:
-    pass
+    import timm.models.beit as _timm_beit
+except ImportError:
+    import types
+    _timm_beit = types.ModuleType("timm.models.beit")
+    sys.modules["timm.models.beit"] = _timm_beit
+
+if not hasattr(_timm_beit, "gen_relative_position_index"):
+    def gen_relative_position_index(*args, **kwargs):
+        # Dummy stub; MiDaS_small should not actually use it.
+        return None
+    _timm_beit.gen_relative_position_index = gen_relative_position_index
 
 # -------------------------------------------------------------------------
 # Log noise off
@@ -66,16 +55,38 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.backends.cudnn.benchmark = True
 
 # -------------------------------------------------------------------------
-# Simple smoothing state for depth tracks, with adaptive smoothing
-depth_tracks = []  # list of dict: {'class': int, 'x': float, 'depth': float, 'miss': int}
-ALPHA_OLD_APPROACH = 0.2
-ALPHA_OLD_AWAY     = 0.7
+# Depth scaling factor: multiplies the relative depth (= 1/disp) so values are larger
+# Adjust this to get values in a more comfortable numeric range (e.g., 10, 50, 100).
+DEPTH_SCALE = 100.0
+
+# -------------------------------------------------------------------------
+# Kalman filter parameters for smoothing scaled relative depth:
+# After scaling, you may need to adjust Q, R accordingly.
+# State: [depth_scaled, velocity_scaled]
+DT = None  # will set after reading FPS
+
+# Process noise covariance Q (2x2). Because depth is scaled, you may need larger Q.
+# Example: if DEPTH_SCALE=100, depth variations might be larger, so Q's diagonal may be larger.
+Q = np.array([[1.0, 0.0],
+              [0.0, 1.0]], dtype=np.float32)  # tune as needed
+
+# Measurement noise variance R (scalar). With scaling, might increase R.
+R = 10.0  # tune: smaller → more trust measurement (less smoothing), larger → smoother but slower
+
+# -------------------------------------------------------------------------
+# Simple tracking & Kalman smoothing state:
+# Each track: dict with keys:
+#   'class': int class id
+#   'x': float last x_center
+#   'state': np.array([depth_scaled, vel_scaled], dtype=float32)
+#   'P': np.array([[...],[...]], dtype=float32)
+#   'miss': int consecutive misses
+depth_tracks = []
 TRACK_X_THRESH = 50
 MAX_MISSES = 5
 
 # -------------------------------------------------------------------------
 # Load HybridNets (drivable-area mask)
-# Patches above must run before this so imports inside HybridNets see them.
 hn = torch.hub.load("datvuthanh/hybridnets", "hybridnets", pretrained=True,
                     trust_repo=True).to(device).eval()
 if device.type == "cuda":
@@ -97,13 +108,13 @@ if str(root_dir) not in sys.path:
 from lib.core.general import non_max_suppression as yolop_nms
 
 # -------------------------------------------------------------------------
-# Load MiDaS (ResNet-based) for depth estimation (no timm/BEiT dependency)
-midas = torch.hub.load("intel-isl/MiDaS", "MiDaS").to(device).eval()
+# Load MiDaS_small for depth estimation (ResNet-based)
+midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small").to(device).eval()
 if device.type == "cuda":
     midas = midas.half()
-# Load MiDaS transforms:
+# Load MiDaS transforms for small model:
 midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
-transform = midas_transforms.default_transform  # uses ResNet backbone, no timm
+transform = midas_transforms.small_transform  # small variant
 
 # -------------------------------------------------------------------------
 # Pre-allocate normalization tensors for HybridNets
@@ -119,16 +130,17 @@ def hn_pre_cpu(rgb: np.ndarray) -> torch.Tensor:
     return t.half() if device.type == "cuda" else t.float()
 
 # -------------------------------------------------------------------------
-# Video I/O (update paths)
+# Video I/O (update paths as needed)
 VIDEO_IN  = r"C:\Users\jiami\Downloads\yt1z.net - 3-Hour Drive on California Freeway Dash Cam Tours (360p).mp4"
-VIDEO_OUT = "output_yolop_depth_smoothed_midas_resnet_patched.avi"
+VIDEO_OUT = "output_yolop_depth_smoothed_kalman_scaled.avi"
 
 cap = cv2.VideoCapture(VIDEO_IN)
-assert cap.isOpened(), "Cannot open input video"
+assert cap.isOpened(), f"Cannot open input video {VIDEO_IN}"
 ret, sample = cap.read()
 assert ret, "Cannot read first frame"
 orig_H, orig_W = sample.shape[:2]
 fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+DT = 1.0 / fps  # time step for Kalman
 
 writer = cv2.VideoWriter(
     VIDEO_OUT,
@@ -177,6 +189,37 @@ def flatten_yolop_outputs(pred):
             pieces.append(t)
     return torch.cat(pieces, 1)
 
+def kalman_predict(state: np.ndarray, P: np.ndarray) -> (np.ndarray, np.ndarray):
+    """
+    Predict step of Kalman filter with constant velocity model.
+    state: [depth_scaled, velocity_scaled]
+    P: 2x2 covariance
+    Returns predicted (state_pred, P_pred).
+    """
+    F = np.array([[1.0, DT],
+                  [0.0, 1.0]], dtype=np.float32)
+    state_pred = F @ state
+    P_pred = F @ P @ F.T + Q
+    return state_pred, P_pred
+
+def kalman_update(state_pred: np.ndarray, P_pred: np.ndarray, meas: float) -> (np.ndarray, np.ndarray):
+    """
+    Update step: measurement model H = [1, 0], measurement z = meas.
+    """
+    y = meas - state_pred[0]
+    S = P_pred[0,0] + R
+    K0 = P_pred[0,0] / S
+    K1 = P_pred[1,0] / S
+    state_upd = state_pred.copy()
+    state_upd[0] = state_pred[0] + K0 * y
+    state_upd[1] = state_pred[1] + K1 * y
+    P_upd = P_pred.copy()
+    P_upd[0,0] = (1 - K0) * P_pred[0,0]
+    P_upd[0,1] = (1 - K0) * P_pred[0,1]
+    P_upd[1,0] = -K1 * P_pred[0,0] + P_pred[1,0]
+    P_upd[1,1] = -K1 * P_pred[0,1] + P_pred[1,1]
+    return state_upd, P_upd
+
 def process_batch(frames, prev_t, global_frame_idx):
     global depth_tracks, _last_depth_maps
     now = time.time()
@@ -187,32 +230,37 @@ def process_batch(frames, prev_t, global_frame_idx):
     depth_maps = []
     run_depth = (global_frame_idx % DEPTH_SKIP == 0)
     if run_depth:
-        # MiDaS inference per frame using ResNet-based MiDaS
+        # MiDaS_small inference per frame: invert disparity to relative depth, then scale
         depth_maps = []
         for frame in frames:
-            # Convert BGR->RGB
             img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            # Apply MiDaS default transform (resizes + normalizes)
             inp = transform(img).to(device)
             if device.type == "cuda":
                 inp = inp.half()
             with torch.no_grad():
-                pred = midas(inp)
-                # Resize output to PROC_H x PROC_W
+                pred = midas(inp)  # [1, H_out, W_out] or [1,1,H_out,W_out]
                 if pred.ndim == 3:
-                    pred = pred.unsqueeze(1)
-                pred_resized = F.interpolate(pred, size=(PROC_H, PROC_W), mode='bilinear', align_corners=False)
-                depth_np = pred_resized.squeeze(1).cpu().numpy()
+                    pred = pred.unsqueeze(1)  # [1,1,H_out,W_out]
+                pred_resized = F.interpolate(pred, size=(PROC_H, PROC_W),
+                                             mode='bilinear', align_corners=False)
+                disp = pred_resized[0, 0]  # tensor shape [PROC_H, PROC_W]
+                # Invert to relative depth and scale:
+                depth_rel = 1.0 / (disp + 1e-6)
+                depth_scaled = depth_rel * DEPTH_SCALE
+                depth_np = depth_scaled.cpu().numpy().astype(np.float32)  # (PROC_H, PROC_W)
+            # Ensure correct shape
+            if depth_np.ndim != 2 or depth_np.shape != (PROC_H, PROC_W):
+                print(f"Warning: unexpected depth_map shape {depth_np.shape}, using zeros")
+                depth_np = np.zeros((PROC_H, PROC_W), dtype=np.float32)
             depth_maps.append(depth_np)
         _last_depth_maps = depth_maps.copy()
     else:
-        # reuse last if same batch size, else zeros
         if _last_depth_maps and len(_last_depth_maps) == batch_size:
             depth_maps = _last_depth_maps
         else:
             depth_maps = [np.zeros((PROC_H, PROC_W), np.float32) for _ in frames]
 
-    # HybridNets/YOLOP preprocessing: attempt GPU resizing always if CUDA available
+    # HybridNets/YOLOP preprocessing: attempt GPU resizing if CUDA available
     use_gpu_resize = False
     if device.type == "cuda":
         try:
@@ -275,13 +323,13 @@ def process_batch(frames, prev_t, global_frame_idx):
 
     for idx, det in enumerate(dets):
         frame = frames[idx]
-        mk = masks_small[idx]
-        mask = cv2.resize(mk.astype(np.uint8), (orig_W, orig_H), cv2.INTER_NEAREST)
+        mask_small = masks_small[idx]
+        mask = cv2.resize(mask_small.astype(np.uint8), (orig_W, orig_H), cv2.INTER_NEAREST)
         overlay = frame.copy()
         overlay[mask == 2] = (0, 255, 0)
         vis = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
 
-        depth_map = depth_maps[idx]
+        depth_map = depth_maps[idx]  # shape (PROC_H, PROC_W), scaled relative depth
 
         if det is not None and len(det):
             if det.device.type != 'cpu':
@@ -293,11 +341,13 @@ def process_batch(frames, prev_t, global_frame_idx):
                     continue
                 xi1, yi1, xi2, yi2 = map(int, (x1, y1, x2, y2))
 
-                # Sample median depth over small patch
+                # Sample median depth with clamped indices
                 x_center = (xi1 + xi2) / 2.0
                 y_bottom = yi2
                 x_proc = int(x_center / sx)
                 y_proc = int(y_bottom / sy)
+                x_proc = max(0, min(x_proc, PROC_W - 1))
+                y_proc = max(0, min(y_proc, PROC_H - 1))
                 x0 = max(0, x_proc - 2)
                 x1p = min(PROC_W - 1, x_proc + 2)
                 y0 = max(0, y_proc - 2)
@@ -308,29 +358,58 @@ def process_batch(frames, prev_t, global_frame_idx):
                 else:
                     depth_val = float(depth_map[y_proc, x_proc])
 
-                # Adaptive smoothing: match track
+                # Kalman smoothing per track (scaled depth_val)
                 matched = None
                 for ti, tr in enumerate(depth_tracks):
                     if tr['class'] == int(cls) and abs(tr['x'] - x_center) < TRACK_X_THRESH:
                         matched = (ti, tr)
                         break
+
                 if matched is not None:
                     ti, tr = matched
-                    old_depth = tr['depth']
-                    alpha_old = ALPHA_OLD_APPROACH if depth_val < old_depth else ALPHA_OLD_AWAY
-                    sm = alpha_old * old_depth + (1 - alpha_old) * depth_val
-                    tr['depth'] = sm
+                    # Predict
+                    try:
+                        state_pred, P_pred = kalman_predict(tr['state'], tr['P'])
+                    except Exception:
+                        state_pred = np.array([depth_val, 0.0], dtype=np.float32)
+                        P_pred = np.eye(2, dtype=np.float32)
+                    # Update if valid measurement
+                    if not (math.isnan(depth_val) or np.isinf(depth_val)):
+                        try:
+                            state_upd, P_upd = kalman_update(state_pred, P_pred, depth_val)
+                        except Exception:
+                            state_upd = np.array([depth_val, 0.0], dtype=np.float32)
+                            P_upd = np.eye(2, dtype=np.float32)
+                    else:
+                        state_upd, P_upd = state_pred, P_pred
+                    tr['state'] = state_upd
+                    tr['P'] = P_upd
                     tr['x'] = x_center
                     tr['miss'] = 0
-                    depth_disp = sm
+                    depth_disp = float(state_upd[0])  # scaled relative depth
                     matched_tracks.add(ti)
                 else:
-                    depth_disp = depth_val
-                    depth_tracks.append({'class': int(cls), 'x': x_center, 'depth': depth_val, 'miss': 0})
-                    matched_tracks.add(len(depth_tracks)-1)
+                    # New track
+                    if math.isnan(depth_val) or np.isinf(depth_val):
+                        continue
+                    state0 = np.array([depth_val, 0.0], dtype=np.float32)
+                    P0 = np.eye(2, dtype=np.float32)
+                    new_tr = {
+                        'class': int(cls),
+                        'x': x_center,
+                        'state': state0,
+                        'P': P0,
+                        'miss': 0
+                    }
+                    depth_tracks.append(new_tr)
+                    ti_new = len(depth_tracks) - 1
+                    matched_tracks.add(ti_new)
+                    depth_disp = float(state0[0])
 
+                # Display: depth_disp is scaled relative depth: smaller => closer
                 label = YOLOP_NAMES[int(cls)] if cls < len(YOLOP_NAMES) else str(int(cls))
                 conf_text = f"{label} c={conf:.2f}"
+                # Show scaled relative depth, e.g. d=12.345
                 depth_text = f"d={depth_disp:.2f}"
 
                 ts = fnt_scale
@@ -344,11 +423,9 @@ def process_batch(frames, prev_t, global_frame_idx):
                 y_line2 = y_line1 - (sz1_h + 2)
 
                 cv2.rectangle(vis, (xi1, yi1), (xi2, yi2), (255, 0, 255), max(1, int(2*scale)))
-                # confidence (bottom line)
                 for col in [(0,0,0), (255,0,255)]:
                     cv2.putText(vis, conf_text, (x_text, y_line1),
                                 cv2.FONT_HERSHEY_SIMPLEX, ts, col, t_bg if col==(0,0,0) else t_fg)
-                # depth (above)
                 for col in [(0,0,0), (255,0,255)]:
                     cv2.putText(vis, depth_text, (x_text, y_line2),
                                 cv2.FONT_HERSHEY_SIMPLEX, ts, col, t_bg if col==(0,0,0) else t_fg)
