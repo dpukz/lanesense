@@ -7,11 +7,14 @@ Real‑time multi‑task perception: semantic lane segmentation, drivable‑area
 This repository contains a double‑file prototype (lanesense.py/lanesensep.py) that combines the strengths of two state‑of‑the‑art architectures: HybridNets for drivable‑area and lane‑line segmentation, and YOLOv5‑Nano/YoloP for lightweight object detection—into a unified, real‑time video processing pipeline. The script down‑samples each frame to a work resolution (640×360 px) for inference, applies FP16 acceleration, and then re‑projects high‑confidence results back onto the original resolution for clear overlays.
 
 lanesense.py: Yolov5N + Hybridnet- runs light, but object detection range limited
-laensensep.py: YoloP + Hybridnet - runs a bit slower, but object detection range greatly improved
+lanesensep.py: YoloP + Hybridnet - runs a bit slower, but object detection range greatly improved
+depthsense.py: YoloP + Hybridnet + monodepth2- runs heavily, but includes everything in lanesensep + depth detection.
 
 **Features**
 
-Multi‑Task Perception· Drivable‑area + lane segmentation via HybridNets· Object detection via YOLOv5n
+Multi‑Task Perception· Drivable‑area + lane segmentation via HybridNets· Object detection via YOLOv5n/YOLOp [Drivable area painting is ommitted]
+
+Depth Sensing- Through monodepth2 relative distances are outputted per YOLO output.
 
 Real‑Time through Smart Down‑ScalingWork‑resolution frames (configurable) are padded to multiples of 32 to satisfy HybridNets’ backbone, slashing compute cost without sacrificing overlay fidelity.
 
@@ -51,7 +54,7 @@ Tip (Windows + GPU): install the official CUDA toolkit before pip install torc
 
 **Quick Start** 
 
-python hybridnet.py
+python hybridnet.py/lanesensep.py/depthsense.py
 
 A preview window appears; press Q to terminate early. An annotated video will be sent saved in AVI format using the source FPS and resolution. If program freezes, force quit python in task mngr.
 
