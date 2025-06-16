@@ -56,7 +56,7 @@ def seg_preprocess(rgb_pad):
     x = x.transpose(2,0,1)
     return torch.from_numpy(x).unsqueeze(0).to(device).half()
 
-BATCH = 8
+BATCH = 16
 frame_q, result_q = queue.Queue(BATCH*2), queue.Queue(BATCH*2)
 _SENTINEL = object()
 cap_lock = threading.Lock()
@@ -95,7 +95,7 @@ def process_batch(frames, prev_t):
             device=device,
             show=False,
             verbose=False,
-            conf=0.2,
+            conf=0.18,
             iou=0.15,
             imgsz=PROC_W
         )
