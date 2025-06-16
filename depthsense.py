@@ -6,7 +6,6 @@ import threading
 import queue
 import sys
 from pathlib import Path
-from PIL import Image
 
 import numpy as np
 import torch
@@ -28,6 +27,7 @@ YOLOP_NAMES = [
 
 # -------------------------------------------------------------------------
 # Inference resolution – divisible by 32 for both nets
+# You may reduce these if too slow (e.g., 512x288 or 320x192).
 PROC_W, PROC_H = 640, 384
 SEG_W, SEG_H = (math.ceil(v/32)*32 for v in (PROC_W, PROC_H))
 
@@ -39,12 +39,10 @@ torch.backends.cudnn.benchmark = True
 # -------------------------------------------------------------------------
 # Simple smoothing state for depth tracks, with adaptive smoothing
 depth_tracks = []  # list of dict: {'class': int, 'x': float, 'depth': float, 'miss': int}
-# Smoothing: when object approaches (depth decreases), use faster response (lower alpha_old).
-# When object recedes (depth increases), use heavier smoothing (higher alpha_old).
-ALPHA_OLD_APPROACH = 0.2  # weight for previous when approaching: lower means new depth influences more
-ALPHA_OLD_AWAY     = 0.7  # weight for previous when receding: higher means smoother increase
-TRACK_X_THRESH = 50       # horizontal proximity threshold in pixels for matching
-MAX_MISSES = 5            # frames to keep unmatched track before deletion
+ALPHA_OLD_APPROACH = 0.2
+ALPHA_OLD_AWAY     = 0.7
+TRACK_X_THRESH = 50
+MAX_MISSES = 5
 
 # -------------------------------------------------------------------------
 # Load HybridNets (drivable-area mask)
@@ -57,6 +55,8 @@ if device.type == "cuda":
 # Load YOLOP (object detection only)
 yolop = torch.hub.load("hustvl/YOLOP", "yolop", pretrained=True,
                        trust_repo=True).to(device).eval()
+if device.type == "cuda":
+    yolop = yolop.half()
 
 # -------------------------------------------------------------------------
 # Add YOLOP repo root to sys.path so we can import its utils
@@ -87,7 +87,6 @@ def load_monodepth2_model(model_name="mono_640x192"):
         decoder_path = model_folder / "depth.pth"
         if not encoder_path.exists() or not decoder_path.exists():
             raise FileNotFoundError(f"Weights not found at {encoder_path} or {decoder_path}")
-        # For mono_640x192: ResNet18
         encoder = ResnetEncoder(18, False).to(device)
         loaded = torch.load(str(encoder_path), map_location=device)
         filtered = {k: v for k, v in loaded.items() if k in encoder.state_dict()}
@@ -106,10 +105,14 @@ def load_monodepth2_model(model_name="mono_640x192"):
 depth_res = load_monodepth2_model("mono_640x192")
 
 # -------------------------------------------------------------------------
-# Preprocess for Monodepth2
+# Pre-allocate normalization tensors for HybridNets
+_hn_mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1,3,1,1)
+_hn_std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(1,3,1,1)
+
+# -------------------------------------------------------------------------
+# Preprocess for Monodepth2 using cv2.resize directly (no PIL)
 def preprocess_depth(frame_bgr, model_info):
-    img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    img_pil = Image.fromarray(img_rgb)
+    # Determine target w,h
     if model_info is None:
         fw, fh = 640, 192
     else:
@@ -118,14 +121,18 @@ def preprocess_depth(frame_bgr, model_info):
             w_h = parts[1].split("x"); fw, fh = int(w_h[0]), int(w_h[1])
         else:
             fw, fh = 640, 192
-    img_resized = img_pil.resize((fw, fh), Image.LANCZOS)
-    tensor = transforms.ToTensor()(img_resized).unsqueeze(0).to(device)
+    # Resize with cv2
+    small = cv2.resize(frame_bgr, (fw, fh), interpolation=cv2.INTER_LINEAR)
+    img_rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+    tensor = torch.from_numpy(img_rgb).permute(2,0,1).unsqueeze(0).to(device).float() / 255.0
     if device.type == "cuda":
         tensor = tensor.half()
+    # Normalize
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
-    tensor = normalize(tensor.squeeze(0)).unsqueeze(0)
-    return tensor, (fw, fh), img_rgb.shape[:2]
+    # We can apply Normalize on CPU or GPU: use functional
+    tensor = normalize(tensor.squeeze(0)).unsqueeze(0).to(device)
+    return tensor, (fw, fh), small.shape[:2]
 
 # -------------------------------------------------------------------------
 # Video I/O (update paths)
@@ -149,10 +156,8 @@ cv2.namedWindow("Output", cv2.WINDOW_NORMAL)
 
 # -------------------------------------------------------------------------
 # HybridNets preprocessing helper
-_hn_mean = np.array([0.485, 0.456, 0.406], np.float32)
-_hn_std  = np.array([0.229, 0.224, 0.225], np.float32)
 def hn_pre_cpu(rgb: np.ndarray) -> torch.Tensor:
-    x = (rgb.astype(np.float32) / 255.0 - _hn_mean) / _hn_std
+    x = (rgb.astype(np.float32) / 255.0 - np.array([0.485, 0.456, 0.406], np.float32)) / np.array([0.229, 0.224, 0.225], np.float32)
     x = x.transpose(2, 0, 1)
     t = torch.from_numpy(x).to(device)
     return t.half() if device.type == "cuda" else t.float()
@@ -163,6 +168,14 @@ frame_q  = queue.Queue(BATCH * 2)
 result_q = queue.Queue(BATCH * 2)
 _SENTINEL = object()
 
+# -------------------------------------------------------------------------
+# Depth skipping: only run depth every N frames
+DEPTH_SKIP = 3  # run depth inference every 3 frames
+# Maintain a buffer of last depth maps to reuse
+_last_depth_maps = []
+_last_depth_frame_indices = []
+
+# -------------------------------------------------------------------------
 def reader():
     while True:
         ret, frame = cap.read()
@@ -190,52 +203,65 @@ def flatten_yolop_outputs(pred):
             pieces.append(t)
     return torch.cat(pieces, 1)
 
-def process_batch(frames, prev_t):
-    global depth_tracks
+def process_batch(frames, prev_t, global_frame_idx):
+    global depth_tracks, _last_depth_maps, _last_depth_frame_indices
     now = time.time()
     fps_inst = 1.0 / ((now - prev_t) / len(frames))
     prev_t = now
 
-    # Depth preprocessing
-    depth_tensors = []
-    for frame in frames:
-        inp, _, _ = preprocess_depth(frame, depth_res[1])
-        depth_tensors.append(inp)
-    depth_batch = torch.cat(depth_tensors, dim=0)
-
-    # Depth inference
-    with torch.inference_mode():
-        if depth_res[1] is None:
-            dm = depth_res[0]
-            if device.type == "cuda":
-                with torch.cuda.amp.autocast():
+    batch_size = len(frames)
+    # Depth preprocessing & inference, with skip
+    depth_maps = []
+    run_depth = (global_frame_idx % DEPTH_SKIP == 0)
+    if run_depth:
+        depth_tensors = []
+        for frame in frames:
+            inp, _, _ = preprocess_depth(frame, depth_res[1])
+            depth_tensors.append(inp)
+        depth_batch = torch.cat(depth_tensors, dim=0)
+        # Depth inference
+        with torch.inference_mode():
+            if depth_res[1] is None:
+                dm = depth_res[0]
+                if device.type == "cuda":
+                    with torch.cuda.amp.autocast():
+                        disp = dm(depth_batch)
+                else:
                     disp = dm(depth_batch)
             else:
-                disp = dm(depth_batch)
-        else:
-            encoder, decoder = depth_res[0]
-            if device.type == "cuda":
-                with torch.cuda.amp.autocast():
+                encoder, decoder = depth_res[0]
+                if device.type == "cuda":
+                    with torch.cuda.amp.autocast():
+                        feats = encoder(depth_batch)
+                        out = decoder(feats)
+                        disp = out.get(("disp", 0), out.get("disp_0"))
+                else:
                     feats = encoder(depth_batch)
                     out = decoder(feats)
                     disp = out.get(("disp", 0), out.get("disp_0"))
-            else:
-                feats = encoder(depth_batch)
-                out = decoder(feats)
-                disp = out.get(("disp", 0), out.get("disp_0"))
-    depth_batch = 1.0 / (disp + 1e-6)
-    depth_maps = []
-    for i in range(depth_batch.shape[0]):
-        d = depth_batch[i:i+1]
-        d_resized = F.interpolate(d, size=(PROC_H, PROC_W), mode="bilinear", align_corners=False)
-        depth_maps.append(d_resized.squeeze().cpu().numpy())
+        depth_batch = 1.0 / (disp + 1e-6)
+        depth_maps = []
+        for i in range(depth_batch.shape[0]):
+            d = depth_batch[i:i+1]
+            d_resized = F.interpolate(d, size=(PROC_H, PROC_W), mode="bilinear", align_corners=False)
+            depth_maps.append(d_resized.squeeze().cpu().numpy())
+        # store for reuse
+        _last_depth_maps = depth_maps.copy()
+        _last_depth_frame_indices = [global_frame_idx + i for i in range(len(frames))]
+    else:
+        # reuse last depth maps if available; else dummy zeros
+        if _last_depth_maps and len(_last_depth_maps) == batch_size:
+            depth_maps = _last_depth_maps
+        else:
+            depth_maps = [np.zeros((PROC_H, PROC_W), np.float32) for _ in frames]
 
-    # HybridNets/YOLOP preprocessing
+    # HybridNets/YOLOP preprocessing: attempt GPU resizing always if CUDA available
     use_gpu_resize = False
     if device.type == "cuda":
         try:
             np_batch = np.stack(frames, axis=0)
             ft = torch.from_numpy(np_batch).permute(0,3,1,2).to(device, non_blocking=True).float()
+            # if half precision desired: convert after resizing
             rgb = ft[:, [2,1,0], :, :]
             small_rgb = F.interpolate(rgb, size=(PROC_H, PROC_W), mode='bilinear', align_corners=False)
             small_bgr = small_rgb[:, [2,1,0], :, :]
@@ -244,10 +270,9 @@ def process_batch(frames, prev_t):
             use_gpu_resize = False
 
     if use_gpu_resize:
+        # Normalize for HybridNets
         rgb_norm = small_rgb.div_(255.0)
-        mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1,3,1,1)
-        std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(1,3,1,1)
-        hn_in = (rgb_norm - mean) / std
+        hn_in = (rgb_norm - _hn_mean) / _hn_std
         B = hn_in.shape[0]
         seg_canvas = torch.zeros((B, 3, SEG_H, SEG_W), device=device, dtype=hn_in.dtype)
         seg_canvas[:, :, :PROC_H, :PROC_W] = hn_in
@@ -267,6 +292,7 @@ def process_batch(frames, prev_t):
             for b in small_bgr
         ]).to(device)
 
+    # Inference
     with torch.inference_mode():
         if device.type == "cuda":
             with torch.cuda.amp.autocast():
@@ -290,7 +316,6 @@ def process_batch(frames, prev_t):
     t_bg, t_fg = max(2, int(3*scale)), max(1, int(1.2*scale))
     scale_tensor = torch.tensor([sx, sy, sx, sy], device='cpu')
 
-    # Track which tracks matched this frame
     matched_tracks = set()
 
     for idx, det in enumerate(dets):
@@ -337,11 +362,7 @@ def process_batch(frames, prev_t):
                 if matched is not None:
                     ti, tr = matched
                     old_depth = tr['depth']
-                    # If object approaches (depth_val < old), use faster response
-                    if depth_val < old_depth:
-                        alpha_old = ALPHA_OLD_APPROACH
-                    else:
-                        alpha_old = ALPHA_OLD_AWAY
+                    alpha_old = ALPHA_OLD_APPROACH if depth_val < old_depth else ALPHA_OLD_AWAY
                     sm = alpha_old * old_depth + (1 - alpha_old) * depth_val
                     tr['depth'] = sm
                     tr['x'] = x_center
@@ -364,7 +385,6 @@ def process_batch(frames, prev_t):
                 x_text = xi1
                 if x_text + max_w > orig_W:
                     x_text = max(0, orig_W - max_w - 1)
-                # Stack vertically: depth above confidence
                 y_line1 = max(yi1 - 5, sz1_h + sz2_h + 10)
                 y_line2 = y_line1 - (sz1_h + 2)
 
@@ -396,16 +416,18 @@ def process_batch(frames, prev_t):
 def worker():
     prev = time.time()
     batch = []
+    global_frame_idx = 0
     while True:
         f = frame_q.get()
         if f is _SENTINEL:
             if batch:
-                process_batch(batch, prev)
+                prev = process_batch(batch, prev, global_frame_idx)
             result_q.put(_SENTINEL)
             return
         batch.append(f)
         if len(batch) >= BATCH:
-            prev = process_batch(batch, prev)
+            prev = process_batch(batch, prev, global_frame_idx)
+            global_frame_idx += len(batch)
             batch = []
 
 threading.Thread(target=reader, daemon=True).start()
@@ -413,7 +435,7 @@ threading.Thread(target=worker, daemon=True).start()
 
 print("running – press q to quit")
 last_disp = time.time()
-FRAME_INTERVAL = 1.0 / 30.0
+FRAME_INTERVAL = 1.0 / fps
 while True:
     frame = result_q.get()
     if frame is _SENTINEL:
