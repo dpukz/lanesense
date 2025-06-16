@@ -1,4 +1,4 @@
-***HybridNets × YOLOv5 Lane‑Aware Object Detection Pipeline***
+***HybridNets × YOLOv5 Lane‑Aware Object Detection Pipeline*** TIMM 0.5.4!!!!!
 
 Real‑time multi‑task perception: semantic lane segmentation, drivable‑area masking, and object detection fused into a single, GPU‑accelerated video processor. [Readme may not always be up to date]
 
