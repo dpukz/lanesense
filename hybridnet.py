@@ -16,16 +16,13 @@ def _cpu_nms(boxes, scores, iou):
 _ops.nms = _cpu_nms
 # -----------------------------------------------------------------------
 
-# “work” resolution
 PROC_W, PROC_H = 640, 360
-# pad to multiples of 32 for HybridNets
 SEG_W = math.ceil(PROC_W/32)*32
 SEG_H = math.ceil(PROC_H/32)*32
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.backends.cudnn.benchmark = True
 
-# load models
 hn = torch.hub.load(
     "datvuthanh/hybridnets", "hybridnets",
     pretrained=True, trust_repo=True
@@ -33,7 +30,6 @@ hn = torch.hub.load(
 yolo = YOLO("yolov5n.pt")
 yolo.model.to(device).eval()
 
-# open video
 VIDEO_IN  = r"C:\Users\jiami\Videos\2025-06-15_17-01-53-front.mp4"
 VIDEO_OUT = "output_downscaled_fix.avi"
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -53,7 +49,6 @@ out = cv2.VideoWriter(
 
 cv2.namedWindow("Output", cv2.WINDOW_NORMAL)
 
-# segmentation preproc
 _hn_mean = np.array([.485, .456, .406], np.float32)
 _hn_std  = np.array([.229, .224, .225], np.float32)
 def seg_preprocess(rgb_pad):
@@ -61,7 +56,6 @@ def seg_preprocess(rgb_pad):
     x = x.transpose(2,0,1)
     return torch.from_numpy(x).unsqueeze(0).to(device).half()
 
-# threading
 BATCH = 8
 frame_q, result_q = queue.Queue(BATCH*2), queue.Queue(BATCH*2)
 _SENTINEL = object()
@@ -81,7 +75,6 @@ def process_batch(frames, prev_t):
     fps_inst = 1.0/((now - prev_t)/len(frames))
     prev_t   = now
 
-    # downscale & pad for segmentation
     smalls_bgr = [cv2.resize(f, (PROC_W, PROC_H)) for f in frames]
     smalls_rgb = [cv2.cvtColor(s, cv2.COLOR_BGR2RGB) for s in smalls_bgr]
     padded = []
@@ -90,14 +83,12 @@ def process_batch(frames, prev_t):
         pad[:PROC_H, :PROC_W] = rgb
         padded.append(pad)
 
-    # HybridNets on padded
     x = torch.cat([seg_preprocess(p) for p in padded], dim=0)
     with torch.inference_mode():
         _,_,_,_,seg = hn(x)
     mask_padded = seg.argmax(1).cpu().numpy().astype(np.uint8)
     masks_small = [mp[:PROC_H, :PROC_W] for mp in mask_padded]
 
-    # YOLO on unpadded smalls
     with torch.inference_mode():
         dets = yolo(
             smalls_bgr,
@@ -109,17 +100,18 @@ def process_batch(frames, prev_t):
             imgsz=PROC_W
         )
 
-    # scale factors
     sx, sy = orig_W/PROC_W, orig_H/PROC_H
+    scale = orig_H / 720
+    fnt_scale = 0.7 * scale
+    thickness_bg = max(2, int(3 * scale))
+    thickness_fg = max(1, int(1.2 * scale))
 
     for orig, mk_s, det in zip(frames, masks_small, dets):
-        # overlay lanes
         mk = cv2.resize(mk_s, (orig_W, orig_H), interpolation=cv2.INTER_NEAREST)
         overlay = orig.copy()
         overlay[mk==2] = (0,255,0)
         vis = cv2.addWeighted(orig, 0.7, overlay, 0.3, 0)
 
-        # draw boxes
         for (x1,y1,x2,y2), c, cl in zip(
                 det.boxes.xyxy.cpu().numpy(),
                 det.boxes.conf.cpu().numpy(),
@@ -129,15 +121,17 @@ def process_batch(frames, prev_t):
             xi1, yi1 = int(x1*sx), int(y1*sy)
             xi2, yi2 = int(x2*sx), int(y2*sy)
             lbl = yolo.names[cl]
-            cv2.rectangle(vis, (xi1,yi1), (xi2,yi2), (255,0,255), 2)
-            cv2.putText(vis, f"{lbl}:{c:.2f}", (xi1, yi1-5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,255), 1)
+            label_text = f"{lbl}:{c:.2f}"
+            cv2.rectangle(vis, (xi1,yi1), (xi2,yi2), (255,0,255), max(1, int(2 * scale)))
+            cv2.putText(vis, label_text, (xi1, max(yi1-5, 0)),
+                        cv2.FONT_HERSHEY_SIMPLEX, fnt_scale, (0, 0, 0), thickness_bg)
+            cv2.putText(vis, label_text, (xi1, max(yi1-5, 0)),
+                        cv2.FONT_HERSHEY_SIMPLEX, fnt_scale, (255, 0, 255), thickness_fg)
 
-        # FPS
-        cv2.putText(vis, f"{fps_inst:4.1f} FPS", (10,25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 3)
-        cv2.putText(vis, f"{fps_inst:4.1f} FPS", (10,25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 1)
+        cv2.putText(vis, f"{fps_inst:4.1f} FPS", (10, int(30 * scale)),
+                    cv2.FONT_HERSHEY_SIMPLEX, fnt_scale, (0, 0, 0), thickness_bg)
+        cv2.putText(vis, f"{fps_inst:4.1f} FPS", (10, int(30 * scale)),
+                    cv2.FONT_HERSHEY_SIMPLEX, fnt_scale, (255, 255, 255), thickness_fg)
 
         result_q.put(vis)
 
@@ -151,7 +145,7 @@ def worker():
         if frm is _SENTINEL:
             if batch:
                 prev = process_batch(batch, prev)
-            result_q.put(_SENTINEL)  # ← fixed name here
+            result_q.put(_SENTINEL)
             return
         batch.append(frm)
         if len(batch) >= BATCH:
