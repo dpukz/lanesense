@@ -1,6 +1,4 @@
-"# lanesense" 
-
-HybridNets × YOLOv5 Lane‑Aware Object Detection Pipeline
+***HybridNets × YOLOv5 Lane‑Aware Object Detection Pipeline***
 
 Real‑time multi‑task perception: semantic lane segmentation, drivable‑area masking, and object detection fused into a single, GPU‑accelerated video processor.
 
@@ -57,10 +55,15 @@ A preview window appears; press Q to terminate early. An annotated video will be
 **CLI Arguments**
 
 --Input    : Path to input video or webcam index (Required)
+
 --output   : Output video file name
+
 --proc-size: WxH for inference down-scaling. Must be <= source size.
+
 --batch    : Number of frames per HybridNets batch (GPU VRAM trade-off).
+
 --conf     : YOLO object-confidence threshold
+
 --iou      : YOLO NMS IoU threshold.
 
 **Workflow** 
