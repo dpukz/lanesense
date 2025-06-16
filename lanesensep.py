@@ -57,7 +57,7 @@ from lib.core.general import non_max_suppression as yolop_nms
 
 # -------------------------------------------------------------------------
 # Video I/O
-VIDEO_IN  = r"C:\Users\jiami\Videos\2025-06-15_17-06-56-front.mp4"
+VIDEO_IN  = r"C:\Users\jiami\Videos\2025-06-15_16-32-40-front.mp4"
 VIDEO_OUT = "output_yolop_fix.avi"
 
 cap = cv2.VideoCapture(VIDEO_IN)

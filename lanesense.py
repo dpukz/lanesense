@@ -30,7 +30,7 @@ hn = torch.hub.load(
 yolo = YOLO("yolov5n.pt")
 yolo.model.to(device).eval()
 
-VIDEO_IN  = r"C:\Users\jiami\Videos\2025-06-15_17-01-53-front.mp4"
+VIDEO_IN  = r"C:\Users\jiami\Videos\2025-06-15_16-32-40-front.mp4"
 VIDEO_OUT = "output_downscaled_fix.avi"
 cap = cv2.VideoCapture(VIDEO_IN)
 assert cap.isOpened(), "Cannot open video"

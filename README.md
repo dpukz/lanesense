@@ -4,7 +4,10 @@ Real‑time multi‑task perception: semantic lane segmentation, drivable‑area
 
 **Introduction**
 
-This repository contains a single‑file prototype (lanesense.py) that combines the strengths of two state‑of‑the‑art architectures: HybridNets for drivable‑area and lane‑line segmentation, and YOLOv5‑Nano for lightweight object detection—into a unified, real‑time video processing pipeline. The script down‑samples each frame to a work resolution (640×360 px) for inference, applies FP16 acceleration, and then re‑projects high‑confidence results back onto the original resolution for clear overlays.
+This repository contains a double‑file prototype (lanesense.py/lanesensep.py) that combines the strengths of two state‑of‑the‑art architectures: HybridNets for drivable‑area and lane‑line segmentation, and YOLOv5‑Nano/YoloP for lightweight object detection—into a unified, real‑time video processing pipeline. The script down‑samples each frame to a work resolution (640×360 px) for inference, applies FP16 acceleration, and then re‑projects high‑confidence results back onto the original resolution for clear overlays.
+
+lanesense.py: Yolov5N + Hybridnet- runs light, but object detection range limited
+laensensep.py: YoloP + Hybridnet - runs a bit slower, but object detection range greatly improved
 
 **Features**
 
