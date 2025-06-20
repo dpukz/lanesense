@@ -117,7 +117,7 @@ def hn_pre_cpu(rgb: np.ndarray) -> torch.Tensor:
 
 # -------------------------------------------------------------------------
 # Video I/O (update paths as needed)
-VIDEO_IN  = r"C:\Users\jiami\Videos\2025-06-15_17-01-53-front.mp4"
+VIDEO_IN = r"C:\Users\Lior\Documents\lanesense\2025-06-15_16-34-41-front.mp4"
 VIDEO_OUT = "output_yolop_depth_smoothed_kalman_scaled.avi"
 
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -139,7 +139,7 @@ cv2.namedWindow("Output", cv2.WINDOW_NORMAL)
 
 # -------------------------------------------------------------------------
 BATCH = 8
-frame_q  = queue.Queue(BATCH * 2)
+frame_q = queue.Queue(BATCH * 2)
 result_q = queue.Queue(BATCH * 2)
 _SENTINEL = object()
 
@@ -166,7 +166,7 @@ def flatten_yolop_outputs(pred):
         return pred
     pieces = []
     for p in pred:
-        for t in (p if isinstance(p, (list, tuple)) else [p]):
+        for t in p if isinstance(p, (list, tuple)) else [p]:
             if t.dim() == 5:
                 bs, a, h, w, c = t.shape
                 t = t.reshape(bs, a * h * w, c)
@@ -211,7 +211,7 @@ def process_batch(frames, prev_t, global_frame_idx):
     batch_size = len(frames)
     # ----------------------------
     # Depth inference (batched), with shape-fix for MiDaS output
-    run_depth = (global_frame_idx % DEPTH_SKIP == 0)
+    run_depth = global_frame_idx % DEPTH_SKIP == 0
     depth_maps = []
     if run_depth:
         # Prepare CPU tensors for MiDaS
@@ -344,6 +344,8 @@ def process_batch(frames, prev_t, global_frame_idx):
         vis = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
 
         depth_map = depth_maps[idx]  # [PROC_H, PROC_W]
+        center_car_info = None
+        min_distance_from_center = float("inf")
 
         if det is not None and len(det):
             if det.device.type == 'cuda':
@@ -351,9 +353,27 @@ def process_batch(frames, prev_t, global_frame_idx):
             else:
                 det_cpu = det.clone()
             det_cpu[:, :4] *= scale_tensor
+
             for x1, y1, x2, y2, conf, cls in det_cpu.numpy():
                 if conf < 0.45:
                     continue
+
+                if int(cls) == 0:
+                    x_center_check = (x1 + x2) / 2.0
+                    distance_from_center = abs(x_center_check - orig_W / 2.0)
+
+                    if distance_from_center < min_distance_from_center:
+                        min_distance_from_center = distance_from_center
+                        center_car_info = {
+                            "x1": x1,
+                            "y1": y1,
+                            "x2": x2,
+                            "y2": y2,
+                            "conf": conf,
+                            "cls": cls,
+                            "x_center": x_center_check,
+                        }
+                        
                 xi1, yi1, xi2, yi2 = map(int, (x1, y1, x2, y2))
 
                 # Sample median depth
@@ -423,6 +443,13 @@ def process_batch(frames, prev_t, global_frame_idx):
                 conf_text = f"{label} c={conf:.2f}"
                 depth_text = f"d={depth_disp:.2f}"
 
+                # check if the car is the one in the center
+                is_center_car = (
+                    center_car_info is not None
+                    and abs(x_center - center_car_info["x_center"]) < 5.0
+                    and int(cls) == 0
+                )
+
                 ts = fnt_scale
                 (sz1_w, sz1_h), _ = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, ts, t_fg)
                 (sz2_w, sz2_h), _ = cv2.getTextSize(depth_text, cv2.FONT_HERSHEY_SIMPLEX, ts, t_fg)
@@ -433,7 +460,13 @@ def process_batch(frames, prev_t, global_frame_idx):
                 y_line1 = max(yi1 - 5, sz1_h + sz2_h + 10)
                 y_line2 = y_line1 - (sz1_h + 2)
 
-                cv2.rectangle(vis, (xi1, yi1), (xi2, yi2), (255, 0, 255), max(1, int(2*scale)))
+                cv2.rectangle(
+                    vis,
+                    (xi1, yi1),
+                    (xi2, yi2),
+                    (0, 255, 0) if is_center_car else (255, 0, 255),
+                    max(1, int(2 * scale)),
+                )
                 for col in [(0,0,0), (255,0,255)]:
                     cv2.putText(vis, conf_text, (x_text, y_line1),
                                 cv2.FONT_HERSHEY_SIMPLEX, ts, col, t_bg if col==(0,0,0) else t_fg)
@@ -445,6 +478,34 @@ def process_batch(frames, prev_t, global_frame_idx):
         for col in [(0,0,0), (255,255,255)]:
             cv2.putText(vis, f"{fps_inst:4.1f} FPS", (10,int(30*scale)), cv2.FONT_HERSHEY_SIMPLEX,
                         fnt_scale, col, t_bg if col==(0,0,0) else t_fg)
+
+        # center car d
+        if center_car_info is not None:
+            x_center = center_car_info["x_center"]
+            yi2 = int(center_car_info["y2"])
+            x_proc = int(x_center / sx)
+            y_proc = int(yi2 / sy)
+            x_proc = max(0, min(x_proc, PROC_W - 1))
+            y_proc = max(0, min(y_proc, PROC_H - 1))
+            x0 = max(0, x_proc - 2)
+            x1p = min(PROC_W - 1, x_proc + 2)
+            y0 = max(0, y_proc - 2)
+            y1p = min(PROC_H - 1, y_proc + 2)
+            patch = depth_map[y0 : y1p + 1, x0 : x1p + 1]
+            if patch.size > 0:
+                center_depth = float(np.median(patch))
+            else:
+                center_depth = float(depth_map[y_proc, x_proc])
+    
+            cv2.putText(
+                vis,
+                f"CENTER CAR DISTANCE: {center_depth:4f}",
+                ((orig_W) // 2, int(60 * scale)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                fnt_scale,
+                (0, 255, 0),
+                t_bg
+            )
 
         result_q.put(vis)
 
