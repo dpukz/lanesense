@@ -326,7 +326,6 @@ def process_batch(frames, prev_t, global_frame_idx):
     for idx, det in enumerate(dets):
         frame = frames[idx]
         mask_small = masks_small[idx]
-        print(mask_small.ndim)
         for i in range(len(mask_small)):
             # find the middle column and then go immediately left and right to find the innermost lane (value == 2) and then take their mean, that's the center of the ego lane
             rowlen = mask_small[i].size
