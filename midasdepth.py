@@ -326,19 +326,10 @@ def process_batch(frames, prev_t, global_frame_idx):
     for idx, det in enumerate(dets):
         frame = frames[idx]
         mask_small = masks_small[idx]
-        print(mask_small.ndim)
-        for i in range(len(mask_small)):
+        print(mask_small)
+        for row in np.nditer(mask_small):
             # find the middle column and then go immediately left and right to find the innermost lane (value == 2) and then take their mean, that's the center of the ego lane
-            rowlen = mask_small[i].size
-            basel = rowlen // 2
-            baser = basel + 1
-            while basel > 0 and mask_small[i][basel] != 2:
-                basel -= 1
-            while baser < rowlen and mask_small[i][baser] != 2:
-                baser += 1
-            if basel > 0 and baser < rowlen:
-                midpoint = (basel + baser) // 2
-                mask_small[i][midpoint] = 3
+            pass
         mask = cv2.resize(mask_small.astype(np.uint8), (orig_W, orig_H), cv2.INTER_CUBIC)
         overlay = frame.copy()
         overlay[mask == 2] = (0, 255, 0)
