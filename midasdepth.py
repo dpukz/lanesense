@@ -117,7 +117,7 @@ def hn_pre_cpu(rgb: np.ndarray) -> torch.Tensor:
 
 # -------------------------------------------------------------------------
 # Video I/O (update paths as needed)
-VIDEO_IN  = r"C:\Users\jiami\Videos\2025-06-15_17-06-56-front.mp4"
+VIDEO_IN  = r"C:\Users\Shadow\Downloads\2025-06-15_16-34-41-front.mp4"
 VIDEO_OUT = "output_yolop_depth_smoothed_kalman_scaled.avi"
 
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -326,7 +326,11 @@ def process_batch(frames, prev_t, global_frame_idx):
     for idx, det in enumerate(dets):
         frame = frames[idx]
         mask_small = masks_small[idx]
-        mask = cv2.resize(mask_small.astype(np.uint8), (orig_W, orig_H), cv2.INTER_NEAREST)
+        print(mask_small)
+        for row in np.nditer(mask_small):
+            # find the middle column and then go immediately left and right to find the innermost lane (value == 2) and then take their mean, that's the center of the ego lane
+            pass
+        mask = cv2.resize(mask_small.astype(np.uint8), (orig_W, orig_H), cv2.INTER_CUBIC)
         overlay = frame.copy()
         overlay[mask == 2] = (0, 255, 0)
         vis = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
