@@ -337,8 +337,7 @@ def process_batch(frames, prev_t, global_frame_idx):
                 baser += 1
             if basel > 0 and baser < rowlen:
                 midpoint = (basel + baser) // 2
-                for j in range(-4, 4):
-                    mask_small[i][midpoint + j] = 3
+                mask_small[i][midpoint] = 3
         mask = cv2.resize(mask_small.astype(np.uint8), (orig_W, orig_H), cv2.INTER_CUBIC)
         overlay = frame.copy()
         overlay[mask == 2] = (0, 255, 0)
