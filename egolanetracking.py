@@ -117,7 +117,7 @@ def hn_pre_cpu(rgb: np.ndarray) -> torch.Tensor:
 
 # -------------------------------------------------------------------------
 # Video I/O (update paths as needed)
-VIDEO_IN = r"C:\Users\Lior\Documents\lanesense\2025-06-15_16-36-42-front.mp4"
+VIDEO_IN = r"C:\Users\jiami\Videos\2025-06-15_16-32-40-front.mp4"
 VIDEO_OUT = "output_yolop_depth_smoothed_kalman_scaled.avi"
 
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -346,8 +346,10 @@ def process_batch(frames, prev_t, global_frame_idx):
     scale_tensor = torch.tensor([sx, sy, sx, sy], device='cpu')
 
     matched_tracks = set()
+    center_car_info = None
 
     for idx, det in enumerate(dets):
+        center_car_info = None
         frame = frames[idx]
         mask_small = masks_small[idx]
         for i in range(len(mask_small)):
@@ -629,8 +631,8 @@ def process_batch(frames, prev_t, global_frame_idx):
                 cv2.FONT_HERSHEY_SIMPLEX,
                 fnt_scale*0.6,
                 (0, 0, 0),
-                t_bg * 0.6
-            )
+                int(max(1, t_bg * 0.6))  # now an integer
+            )   
 
         result_q.put(vis)
 
