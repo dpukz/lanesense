@@ -117,7 +117,7 @@ def hn_pre_cpu(rgb: np.ndarray) -> torch.Tensor:
 
 # -------------------------------------------------------------------------
 # Video I/O (update paths as needed)
-VIDEO_IN = r"C:\Users\jiami\Videos\2025-06-15_16-32-40-front.mp4"
+VIDEO_IN = r"C:\Users\Shadow\Downloads\2025-06-15_16-32-40-front.mp4"
 VIDEO_OUT = "output_yolop_depth_smoothed_kalman_scaled.avi"
 
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -352,7 +352,8 @@ def process_batch(frames, prev_t, global_frame_idx):
         center_car_info = None
         frame = frames[idx]
         mask_small = masks_small[idx]
-        for i in range(len(mask_small)):
+        last_mp = None
+        for i in range(len(mask_small) - 1, -1, -1):
             # find the middle column and then go immediately left and right to find the innermost lane (value == 2) and then take their mean, that's the center of the ego lane
             rowlen = mask_small[i].size
             basel = rowlen // 2
@@ -363,8 +364,10 @@ def process_batch(frames, prev_t, global_frame_idx):
                 baser += 1
             if basel > 0 and baser < rowlen:
                 midpoint = (basel + baser) // 2
-                for j in range(-4, 5):
-                    mask_small[i][midpoint + j] = 3
+                if last_mp == None or (last_mp != None and abs(midpoint - last_mp) <= 15):
+                    for j in range(-4, 5):
+                        mask_small[i][midpoint + j] = 3
+                    last_mp = midpoint
         mask = cv2.resize(mask_small.astype(np.uint8), (orig_W, orig_H), cv2.INTER_CUBIC)
         overlay = frame.copy()
         overlay[mask == 2] = (0, 255, 0)
