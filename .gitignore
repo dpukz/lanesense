@@ -1,4 +1,6 @@
 *.avi
+*.mp4
+*.txt
 *.onxx
 .venv
 .vscode

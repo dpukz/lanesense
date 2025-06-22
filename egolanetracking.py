@@ -117,7 +117,7 @@ def hn_pre_cpu(rgb: np.ndarray) -> torch.Tensor:
 
 # -------------------------------------------------------------------------
 # Video I/O (update paths as needed)
-VIDEO_IN = r"C:\Users\Lior\Documents\lanesense\2025-06-15_16-34-41-front.mp4"
+VIDEO_IN = r"C:\Users\Lior\Documents\lanesense\2025-06-15_16-36-42-front.mp4"
 VIDEO_OUT = "output_yolop_depth_smoothed_kalman_scaled.avi"
 
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -153,6 +153,30 @@ _last_depth_maps = []
 seg_canvas_buffer = None  # will allocate on first batch in GPU
 
 # -------------------------------------------------------------------------
+control_values = []
+error_history = []
+dvalue_history = []
+TARGET = 0.7
+def calculate_pid_control(current_value, target, previous_values=None, window_size=10, error_history=None):
+    error = target - current_value
+    
+    kp = 0.8
+    kd = 0.1
+    ki = 0.04
+    
+    derivative = 0
+    if previous_values and len(previous_values) >= 2:
+        derivative = previous_values[-1] - previous_values[-2]
+    
+    integral = 0
+    if error_history and len(error_history) > 0:
+        integral = max(-10, min(10, sum(error_history[-window_size:])))
+    
+    control = kp * error + kd * derivative + ki * integral
+    
+    return max(-1, min(1, -control))
+# -------------------------------------------------------------------------
+
 def reader():
     while True:
         ret, frame = cap.read()
@@ -344,10 +368,9 @@ def process_batch(frames, prev_t, global_frame_idx):
         overlay[mask == 2] = (0, 255, 0)
         overlay[mask == 3] = (0, 0, 255)
         vis = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
-
         depth_map = depth_maps[idx]  # [PROC_H, PROC_W]
-        center_car_info = None
-        min_distance_from_center = float("inf")
+        center_car_candidates = []
+        CENTER_DETECTION_RADIUS = orig_W * 0.12
 
         if det is not None and len(det):
             if det.device.type == 'cuda':
@@ -364,9 +387,23 @@ def process_batch(frames, prev_t, global_frame_idx):
                     x_center_check = (x1 + x2) / 2.0
                     distance_from_center = abs(x_center_check - orig_W / 2.0)
 
-                    if distance_from_center < min_distance_from_center:
-                        min_distance_from_center = distance_from_center
-                        center_car_info = {
+                    if distance_from_center <= CENTER_DETECTION_RADIUS:
+                        y_bottom = y2
+                        x_proc = int(x_center_check / sx)
+                        y_proc = int(y_bottom / sy)
+                        x_proc = max(0, min(x_proc, PROC_W - 1))
+                        y_proc = max(0, min(y_proc, PROC_H - 1))
+                        x0 = max(0, x_proc - 2)
+                        x1p = min(PROC_W - 1, x_proc + 2)
+                        y0 = max(0, y_proc - 2)
+                        y1p = min(PROC_H - 1, y_proc + 2)
+                        patch = depth_map[y0:y1p+1, x0:x1p+1]
+                        if patch.size > 0:
+                            car_depth = float(np.median(patch))
+                        else:
+                            car_depth = float(depth_map[y_proc, x_proc])
+                        
+                        center_car_candidates.append({
                             "x1": x1,
                             "y1": y1,
                             "x2": x2,
@@ -374,7 +411,27 @@ def process_batch(frames, prev_t, global_frame_idx):
                             "conf": conf,
                             "cls": cls,
                             "x_center": x_center_check,
-                        }
+                            "distance_from_center": distance_from_center,
+                            "depth": car_depth
+                        })           
+            center_car_info = None
+            if center_car_candidates:       
+                max_depth = max(car["depth"] for car in center_car_candidates)
+                max_distance = max(car["distance_from_center"] for car in center_car_candidates)
+
+                            
+                DEPTH_WEIGHT = 0.6
+                CENTER_WEIGHT = 0.4
+                for car in center_car_candidates:
+                    norm_depth = car["depth"] / max(max_depth, 1.0)
+                    norm_distance = car["distance_from_center"] / max(max_distance, 1.0)
+                    car["weighted_score"] = (DEPTH_WEIGHT * norm_depth) + (CENTER_WEIGHT * norm_distance)
+                
+                center_car_info = min(center_car_candidates, key=lambda car: car["weighted_score"])
+                
+            for x1, y1, x2, y2, conf, cls in det_cpu.numpy():
+                if conf < 0.45:
+                    continue
                         
                 xi1, yi1, xi2, yi2 = map(int, (x1, y1, x2, y2))
 
@@ -507,6 +564,72 @@ def process_batch(frames, prev_t, global_frame_idx):
                 fnt_scale,
                 (0, 255, 0),
                 t_bg
+            )
+        
+            control = calculate_pid_control(center_depth, TARGET, dvalue_history, error_history=error_history)
+            
+            if len(error_history) > 20:
+                error_history.pop(0)
+            if len(dvalue_history) > 20:
+                dvalue_history.pop(0)
+            if len(control_values) > 20:
+                control_values.pop(0)
+            
+            error_history.append(TARGET - center_depth)
+            dvalue_history.append(center_depth)
+            control_values.append(control)
+            
+            rect_left = 10
+            rect_right = 60
+            rect_bottom = orig_H - 10
+            rect_top = orig_H - 110
+            bar_height = int(100 * abs(control))
+            bar_top = rect_bottom - bar_height
+            bar_bottom = rect_bottom
+
+            cv2.rectangle( # bg
+                vis,
+                (rect_left, rect_top),
+                (rect_right, rect_bottom),
+                (40, 40, 40),
+                -1
+            )
+            
+            interp = 1.0 + (control if control < 0 else -control)
+            r = 255 if control < 0 else int(255 * interp)
+            g = int(255 * interp) if control < 0 else 255
+            b = int(255 * interp)
+            cv2.rectangle( # value
+                vis,
+                (rect_left, min(bar_top, bar_bottom)),
+                (rect_right, max(bar_top, bar_bottom)),
+                (b, g, r),
+                -1
+            )
+            cv2.rectangle( # border
+                vis,
+                (rect_left, rect_top),
+                (rect_right, rect_bottom),
+                (0, 0, 0),
+                2
+            )
+            cv2.putText(
+                vis,
+                f"Control: {control:.2f}",
+                (rect_right + 10, rect_bottom - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                fnt_scale*0.8,
+                (0, 0, 0),
+                t_bg
+            )
+            cv2.putText(
+                vis,
+                f"{TARGET} Target ({(TARGET - center_depth):.2f})",
+                (rect_right + 10, rect_top + 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                fnt_scale*0.6,
+                (0, 0, 0),
+                t_bg * 0.6
             )
 
         result_q.put(vis)
