@@ -353,7 +353,9 @@ def process_batch(frames, prev_t, global_frame_idx):
         frame = frames[idx]
         mask_small = masks_small[idx]
         last_mp = None
-        for i in range(len(mask_small) - 1, -1, -1):
+        ow, oh = mask_small.shape
+        pts = list()
+        for i in range(len(mask_small) - 1, -1, -20):
             # find the middle column and then go immediately left and right to find the innermost lane (value == 2) and then take their mean, that's the center of the ego lane
             rowlen = mask_small[i].size
             basel = rowlen // 2
@@ -368,11 +370,14 @@ def process_batch(frames, prev_t, global_frame_idx):
                     for j in range(-4, 5):
                         mask_small[i][midpoint + j] = 3
                     last_mp = midpoint
+                    pts.append(np.array([midpoint, i], dtype=np.int32))
         mask = cv2.resize(mask_small.astype(np.uint8), (orig_W, orig_H), cv2.INTER_CUBIC)
         overlay = frame.copy()
         overlay[mask == 2] = (0, 255, 0)
-        overlay[mask == 3] = (0, 0, 255)
+        #overlay[mask == 3] = (0, 0, 255)
         vis = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
+        w, h, ch = overlay.shape
+        M = cv2.getAffineTransform(np.float32([[ow, 0], [0, oh], [0, 0]]), np.float32([[w, 0], [0, h], [0, 0]]))
         depth_map = depth_maps[idx]  # [PROC_H, PROC_W]
         center_car_candidates = []
         CENTER_DETECTION_RADIUS = orig_W * 0.12
@@ -560,6 +565,12 @@ def process_batch(frames, prev_t, global_frame_idx):
                 center_depth = float(np.median(patch))
             else:
                 center_depth = float(depth_map[y_proc, x_proc])
+            
+            scaled_pts = []
+            for p in cv2.transform(np.array([pts], dtype=np.int32), M)[0]:
+                if p[0] > 0.5 * h and p[0] > yi2:
+                    scaled_pts.append(p)
+            cv2.polylines(vis, [np.array(scaled_pts, dtype=np.int32)], False, (255, 0, 0), 40)
     
             cv2.putText(
                 vis,
@@ -636,7 +647,12 @@ def process_batch(frames, prev_t, global_frame_idx):
                 (0, 0, 0),
                 int(max(1, t_bg * 0.6))  # now an integer
             )   
-
+        else:
+            scaled_pts = []
+            for p in cv2.transform(np.array([pts], dtype=np.int32), M)[0]:
+                if p[0] > 0.5 * h:
+                    scaled_pts.append(p)
+            cv2.polylines(vis, [np.array(scaled_pts, dtype=np.int32)], False, (255, 0, 0), 40)
         result_q.put(vis)
 
     # Age and prune tracks
