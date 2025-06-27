@@ -117,7 +117,7 @@ def hn_pre_cpu(rgb: np.ndarray) -> torch.Tensor:
 
 # -------------------------------------------------------------------------
 # Video I/O (update paths as needed)
-VIDEO_IN = r"C:\Users\Shadow\Downloads\2025-06-15_17-06-56-front.mp4"
+VIDEO_IN = r"C:\Users\Shadow\Downloads\2025-06-15_16-36-42-front.mp4"
 VIDEO_OUT = "output_yolop_depth_smoothed_kalman_scaled.avi"
 
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -136,6 +136,11 @@ writer = cv2.VideoWriter(
     (orig_W, orig_H)
 )
 cv2.namedWindow("Output", cv2.WINDOW_NORMAL)
+
+# -------------------------------------------------------------------------
+# Image I/O
+STEERING_IN = r"C:\Users\Shadow\Downloads\steering-wheel.png"
+steering_wheel = cv2.imread(STEERING_IN, cv2.IMREAD_UNCHANGED)
 
 # -------------------------------------------------------------------------
 BATCH = 8
@@ -407,6 +412,7 @@ def process_batch(frames, prev_t, global_frame_idx):
         overlay[mask == 3] = (0, 0, 255)
         vis = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
         depth_map = depth_maps[idx]  # [PROC_H, PROC_W]
+
         if tot_s != 0:
             avg_slope /= tot_s
         global old_angle, angle
@@ -414,7 +420,23 @@ def process_batch(frames, prev_t, global_frame_idx):
         angle = math.atan(tot_s)
         if angle < math.pi / 4 and angle > math.pi / -4:
             angle = old_angle
-        print(angle)
+
+        steer_wheel_size = steering_wheel.shape
+        M = cv2.getRotationMatrix2D((steer_wheel_size[1] / 2, steer_wheel_size[0] / 2), (angle * 180 / math.pi) - 90, 1.0)
+        tilted_wheel = cv2.warpAffine(steering_wheel, M, (int(steer_wheel_size[1]), int(steer_wheel_size[0])), flags = cv2.INTER_CUBIC)
+        y_offset = int(len(mask) - tilted_wheel.shape[0])
+        x_offset = int(len(mask[0]) / 2 - tilted_wheel.shape[1] / 2)
+        y1, y2 = y_offset, y_offset + tilted_wheel.shape[0]
+        x1, x2 = x_offset, x_offset + tilted_wheel.shape[1]
+
+        alpha_s = tilted_wheel[:, :, 3] / 255.0
+        alpha_l = 1.0 - alpha_s
+
+        for c in range(0, 3):
+            vis[y1:y2, x1:x2, c] = (alpha_s * tilted_wheel[:, :, c] +
+                                    alpha_l * vis[y1:y2, x1:x2, c])
+
+
         center_car_candidates = []
         CENTER_DETECTION_RADIUS = orig_W * 0.12
 
