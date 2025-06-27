@@ -355,7 +355,14 @@ def process_batch(frames, prev_t, global_frame_idx):
         last_mp = None
         ow, oh = mask_small.shape
         pts = list()
-        for i in range(len(mask_small) - 1, -1, -20):
+        slope = None
+        delta_x = 1
+        for i in range(len(mask_small) - 1, -1, -1):
+            if slope != None:
+                for j in range(-4, 5):
+                    mask_small[i][midpoint + j] = 3
+                last_mp = midpoint
+                #pts.append(np.array([midpoint, i], dtype=np.int32))
             # find the middle column and then go immediately left and right to find the innermost lane (value == 2) and then take their mean, that's the center of the ego lane
             rowlen = mask_small[i].size
             basel = rowlen // 2
@@ -366,18 +373,21 @@ def process_batch(frames, prev_t, global_frame_idx):
                 baser += 1
             if basel > 0 and baser < rowlen:
                 midpoint = (basel + baser) // 2
-                if last_mp == None or (last_mp != None and abs(midpoint - last_mp) <= 15):
+                if last_mp != None:
+                    slope = int((last_mp - midpoint) / delta_x)
+                    delta_x = 5
+                if True or last_mp == None or (last_mp != None and abs(midpoint - last_mp) <= 15):
                     for j in range(-4, 5):
                         mask_small[i][midpoint + j] = 3
                     last_mp = midpoint
-                    pts.append(np.array([midpoint, i], dtype=np.int32))
+                    #pts.append(np.array([midpoint, i], dtype=np.int32))
         mask = cv2.resize(mask_small.astype(np.uint8), (orig_W, orig_H), cv2.INTER_CUBIC)
         overlay = frame.copy()
         overlay[mask == 2] = (0, 255, 0)
-        #overlay[mask == 3] = (0, 0, 255)
+        overlay[mask == 3] = (0, 0, 255)
         vis = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
-        w, h, ch = overlay.shape
-        M = cv2.getAffineTransform(np.float32([[ow, 0], [0, oh], [0, 0]]), np.float32([[w, 0], [0, h], [0, 0]]))
+        w, h, ch = frame.shape
+        M = cv2.getAffineTransform(np.float32([[oh, 0], [0, ow], [0, 0]]), np.float32([[h, 0], [0, w], [0, 0]]))
         depth_map = depth_maps[idx]  # [PROC_H, PROC_W]
         center_car_candidates = []
         CENTER_DETECTION_RADIUS = orig_W * 0.12
