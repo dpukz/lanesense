@@ -149,6 +149,11 @@ DEPTH_SKIP = 6  # can tune higher if acceptable
 _last_depth_maps = []
 
 # -------------------------------------------------------------------------
+# Pre-processing constants
+angle = math.pi / 2
+old_angle = math.pi / 2
+
+# -------------------------------------------------------------------------
 # Pre-allocated buffer for segmentation canvas input
 seg_canvas_buffer = None  # will allocate on first batch in GPU
 
@@ -404,7 +409,12 @@ def process_batch(frames, prev_t, global_frame_idx):
         depth_map = depth_maps[idx]  # [PROC_H, PROC_W]
         if tot_s != 0:
             avg_slope /= tot_s
-        print(avg_slope)
+        global old_angle, angle
+        old_angle = angle
+        angle = math.atan(tot_s)
+        if angle < math.pi / 4 and angle > math.pi / -4:
+            angle = old_angle
+        print(angle)
         center_car_candidates = []
         CENTER_DETECTION_RADIUS = orig_W * 0.12
 
