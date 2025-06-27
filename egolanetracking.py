@@ -352,43 +352,59 @@ def process_batch(frames, prev_t, global_frame_idx):
         center_car_info = None
         frame = frames[idx]
         mask_small = masks_small[idx]
+
         last_mp = None
-        ow, oh = mask_small.shape
-        pts = list()
         slope = None
+        midpoint = None
+        working_mp = None
         delta_x = 1
-        for i in range(len(mask_small) - 1, -1, -1):
-            if slope != None:
-                for j in range(-4, 5):
-                    mask_small[i][midpoint + j] = 3
-                last_mp = midpoint
-                #pts.append(np.array([midpoint, i], dtype=np.int32))
-            # find the middle column and then go immediately left and right to find the innermost lane (value == 2) and then take their mean, that's the center of the ego lane
-            rowlen = mask_small[i].size
-            basel = rowlen // 2
-            baser = basel + 1
-            while basel > 0 and mask_small[i][basel] != 2:
-                basel -= 1
-            while baser < rowlen and mask_small[i][baser] != 2:
-                baser += 1
-            if basel > 0 and baser < rowlen:
-                midpoint = (basel + baser) // 2
-                if last_mp != None:
-                    slope = int((last_mp - midpoint) / delta_x)
-                    delta_x = 5
-                if True or last_mp == None or (last_mp != None and abs(midpoint - last_mp) <= 15):
+        ctr = 0
+        tot_s = 0
+        avg_slope = 0
+        for i in range(len(mask_small) - 1, int(len(mask_small) * 0.55), -1):
+            if ctr <= delta_x and slope != None and abs(slope) <= 15:
+                try:
                     for j in range(-4, 5):
-                        mask_small[i][midpoint + j] = 3
-                    last_mp = midpoint
-                    #pts.append(np.array([midpoint, i], dtype=np.int32))
+                        mask_small[i][working_mp + j] = 3
+                    working_mp += slope
+                    ctr += 1
+                except IndexError:
+                    ctr = delta_x
+            else:
+                # find the middle column and then go immediately left and right to find the innermost lane (value == 2) and then take their mean, that's the center of the ego lane
+                rowlen = mask_small[i].size
+                basel = rowlen // 2
+                baser = basel + 1
+                while basel > 0 and mask_small[i][basel] != 2:
+                    basel -= 1
+                while baser < rowlen and mask_small[i][baser] != 2:
+                    baser += 1
+                if basel > 0 and baser < rowlen:
+                    midpoint = (basel + baser) // 2
+                    if last_mp != None:
+                        old_slope = slope
+                        slope = int((last_mp - midpoint) / delta_x)
+                        if abs(slope) <= 15:
+                            delta_x = 5
+                            ctr = 0
+                            tot_s += 1
+                            avg_slope += slope
+                        else:
+                            slope = old_slope
+                    if last_mp == None or (last_mp != None and abs(midpoint - last_mp) <= 15 * delta_x):
+                        for j in range(-4, 5):
+                            mask_small[i][midpoint + j] = 3
+                        last_mp = midpoint
+                        working_mp = midpoint
         mask = cv2.resize(mask_small.astype(np.uint8), (orig_W, orig_H), cv2.INTER_CUBIC)
         overlay = frame.copy()
         overlay[mask == 2] = (0, 255, 0)
         overlay[mask == 3] = (0, 0, 255)
         vis = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
-        w, h, ch = frame.shape
-        M = cv2.getAffineTransform(np.float32([[oh, 0], [0, ow], [0, 0]]), np.float32([[h, 0], [0, w], [0, 0]]))
         depth_map = depth_maps[idx]  # [PROC_H, PROC_W]
+        if tot_s != 0:
+            avg_slope /= tot_s
+        print(avg_slope)
         center_car_candidates = []
         CENTER_DETECTION_RADIUS = orig_W * 0.12
 
@@ -576,11 +592,11 @@ def process_batch(frames, prev_t, global_frame_idx):
             else:
                 center_depth = float(depth_map[y_proc, x_proc])
             
-            scaled_pts = []
-            for p in cv2.transform(np.array([pts], dtype=np.int32), M)[0]:
-                if p[0] > 0.5 * h and p[0] > yi2:
-                    scaled_pts.append(p)
-            cv2.polylines(vis, [np.array(scaled_pts, dtype=np.int32)], False, (255, 0, 0), 40)
+            # scaled_pts = []
+            # for p in cv2.transform(np.array([pts], dtype=np.int32), M)[0]:
+            #     if p[0] > 0.5 * h and p[0] > yi2:
+            #         scaled_pts.append(p)
+            # cv2.polylines(vis, [np.array(scaled_pts, dtype=np.int32)], False, (255, 0, 0), 40)
     
             cv2.putText(
                 vis,
@@ -657,12 +673,12 @@ def process_batch(frames, prev_t, global_frame_idx):
                 (0, 0, 0),
                 int(max(1, t_bg * 0.6))  # now an integer
             )   
-        else:
-            scaled_pts = []
-            for p in cv2.transform(np.array([pts], dtype=np.int32), M)[0]:
-                if p[0] > 0.5 * h:
-                    scaled_pts.append(p)
-            cv2.polylines(vis, [np.array(scaled_pts, dtype=np.int32)], False, (255, 0, 0), 40)
+        # else:
+        #     scaled_pts = []
+        #     for p in cv2.transform(np.array([pts], dtype=np.int32), M)[0]:
+        #         if p[0] > 0.5 * h:
+        #             scaled_pts.append(p)
+        #     cv2.polylines(vis, [np.array(scaled_pts, dtype=np.int32)], False, (255, 0, 0), 40)
         result_q.put(vis)
 
     # Age and prune tracks
