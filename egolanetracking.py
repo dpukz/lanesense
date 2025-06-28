@@ -1,5 +1,6 @@
 import math
 import logging
+import os
 import cv2
 import time
 import threading
@@ -117,7 +118,7 @@ def hn_pre_cpu(rgb: np.ndarray) -> torch.Tensor:
 
 # -------------------------------------------------------------------------
 # Video I/O (update paths as needed)
-VIDEO_IN = r"C:\Users\Shadow\Downloads\2025-06-15_16-36-42-front.mp4"
+VIDEO_IN = f"{os.getcwd()}\\2025-06-15_16-36-42-front.mp4"
 VIDEO_OUT = "output_yolop_depth_smoothed_kalman_scaled.avi"
 
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -139,7 +140,7 @@ cv2.namedWindow("Output", cv2.WINDOW_NORMAL)
 
 # -------------------------------------------------------------------------
 # Image I/O
-STEERING_IN = r"C:\Users\Shadow\Downloads\steering-wheel.png"
+STEERING_IN = f"{os.getcwd()}\\steering-wheel.png"
 steering_wheel = cv2.imread(STEERING_IN, cv2.IMREAD_UNCHANGED)
 
 # -------------------------------------------------------------------------
